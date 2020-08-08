@@ -1,0 +1,22 @@
+[package]
+name = "grpc-server"
+version = "0.1.0"
+authors = ["Masatoshi Hayashi <m@literalice.com>"]
+edition = "2018"
+
+[[bin]] # Bin to run the gRPC server
+name = "grpc-server"
+path = "src/main.rs"
+
+[dependencies]
+log = "0.4"
+env_logger = "0.7.1"
+tonic = "0.3"
+tonic-health = "0.2.0"
+prost = "0.6"
+reqwest = { version = "0.10", features = ["blocking", "json"] }
+serde_json = { version = "1.0.57" }
+tokio = { version = "0.2", features = ["full"] }
+
+[build-dependencies]
+tonic-build = "0.3"

@@ -1,0 +1,12 @@
+syntax = "proto3";
+package ecstask.v1;
+
+import "google/protobuf/empty.proto";
+
+service TaskInformer {
+    rpc Get (google.protobuf.Empty) returns (TaskInformerResponse);
+}
+
+message TaskInformerResponse {
+    string id = 1;
+}
