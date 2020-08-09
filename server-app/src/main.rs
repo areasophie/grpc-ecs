@@ -48,7 +48,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .set_serving::<TaskInformerServer<TaskInformerImpl>>()
     .await;
 
-    let addr = "[::0]:50051".parse()?;
+    let addr = "0.0.0.0:9051".parse()?;
     let informer = TaskInformerImpl::default();
 
     Server::builder()

@@ -20,5 +20,5 @@ RUN ls /usr/src/server-app/target/release/
 FROM rust:1.45.2
 COPY --from=builder /usr/src/server-app/target/release/grpc-server .
 USER 1000
-EXPOSE 50051
+EXPOSE 9051
 CMD ["./grpc-server"]

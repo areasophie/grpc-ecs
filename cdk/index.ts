@@ -3,8 +3,10 @@ import iam = require('@aws-cdk/aws-iam')
 import ec2 = require('@aws-cdk/aws-ec2')
 import ecr = require('@aws-cdk/aws-ecr')
 import ecs = require('@aws-cdk/aws-ecs')
+import elbv2 = require('@aws-cdk/aws-elasticloadbalancingv2')
 import ecs_patterns = require('@aws-cdk/aws-ecs-patterns')
 import { FargatePlatformVersion } from '@aws-cdk/aws-ecs'
+import { SecurityGroup } from '@aws-cdk/aws-ec2'
 
 const app = new core.App()
 
@@ -28,63 +30,122 @@ class BaseStack extends core.Stack {
             vpc: this.vpc,
             clusterName: clusterName
         })
-        // const spotASG = this.cluster.addCapacity('spot', {
-        //     instanceType: new ec2.InstanceType("t3.large"),
-        //     minCapacity: 2,
-        //     maxCapacity: 5,
-        //     spotPrice: '0.1'
-        // })
+    }
+}
 
-        // new core.CfnOutput(this, "spot-asg-name", {
-        //     value: spotASG.autoScalingGroupName,
-        //     exportName: "spot-asg-name"
-        // })
+class RepositoryStack extends core.Stack {
+    repository: ecr.Repository
+    
+    constructor(scope: core.App, id: string, name: string, props: core.StackProps = {}) {
+        super(scope, id, props)
+
+        this.repository = new ecr.Repository(this, 'repository', {
+            repositoryName: name
+        })
     }
 }
 
 class ServerStack extends core.Stack {
     base: BaseStack
+    loadBalancer: elbv2.ILoadBalancerV2
     
-    constructor(scope: core.App, id: string, base: BaseStack, props: core.StackProps = {}) {
+    constructor(scope: core.App, id: string, base: BaseStack, repositoryStack: RepositoryStack, props: core.StackProps = {}) {
         super(scope, id, props)
         this.base = base
 
-        const repository = new ecr.Repository(this, 'server-repository', {
-            repositoryName: 'areasophie/grpc-ecs-server'
-        })
-
-        const taskImage: ecs_patterns.NetworkLoadBalancedTaskImageOptions = {
-            image: ecs.ContainerImage.fromEcrRepository(repository),
-            containerPort: 50051,
-            environment: {
-                RUST_LOG: 'info',
-            }
-        }
-
-        const loadBalancedService = new ecs_patterns.NetworkLoadBalancedFargateService(this, "grpc-server", {
-            serviceName: 'grpc-server',
-            cluster: this.base.cluster,
-            platformVersion: FargatePlatformVersion.VERSION1_4,
+        const task = new ecs.FargateTaskDefinition(this, 'task', {
             cpu: 256,
             memoryLimitMiB: 512,
-            desiredCount: 2,
-            publicLoadBalancer: false,
-            taskImageOptions: taskImage,
+        })
+        const container = task.addContainer('default', {
+            image: ecs.ContainerImage.fromEcrRepository(repositoryStack.repository),
+            environment: {
+                RUST_LOG: 'debug',
+            },
+            logging: ecs.LogDrivers.awsLogs({ streamPrefix: 'sophie-grpc-ecs-server' })
+        })
+        container.addPortMappings({
+            containerPort: 9051,
         })
 
-        // const cfnResource = loadBalancedService.service.node.children[0] as ecs.CfnService
-        
-        // cfnResource.addDeletionOverride("Properties.LaunchType")
-        //  
-        // loadBalancedService.taskDefinition.addToTaskRolePolicy(
-        //     new iam.PolicyStatement({
-        //         actions: [
-        //             'ecs:ListTasks',
-        //             'ecs:DescribeTasks'
-        //         ],
-        //         resources: ['*']
-        //     })
-        // )
+        const serviceSecurityGroup = new ec2.SecurityGroup(this, `service-security-group`, {
+            vpc: this.base.vpc,
+            allowAllOutbound: true,
+            description: 'SG for the service on fargate'
+        })
+        serviceSecurityGroup.addIngressRule(ec2.Peer.ipv4(this.base.vpc.vpcCidrBlock), ec2.Port.tcp(9051), 'gRPC port')
+
+        const service = new ecs.FargateService(this, 'service', {
+            serviceName: 'grpc-server',
+            cluster: this.base.cluster,
+            taskDefinition: task,
+            desiredCount: 2,
+            platformVersion: FargatePlatformVersion.VERSION1_4,
+            securityGroups: [ serviceSecurityGroup ]
+        })
+
+        const loadBalancer = new elbv2.NetworkLoadBalancer(this, 'lb', {
+            vpc: this.base.vpc,
+            internetFacing: false,
+            crossZoneEnabled: true
+        })
+        const listener = loadBalancer.addListener('listener', { port: 80 })
+        listener.addTargets('grpc', {
+          port: 9051,
+          targets: [service]
+        })
+
+        this.loadBalancer = loadBalancer
+    }
+}
+
+class ClientStack extends core.Stack {
+    base: BaseStack
+    
+    constructor(scope: core.App, id: string, base: BaseStack, serverStack: ServerStack, repositoryStack: RepositoryStack, props: core.StackProps = {}) {
+        super(scope, id, props)
+        this.base = base
+
+        const task = new ecs.FargateTaskDefinition(this, 'task', {
+            cpu: 256,
+            memoryLimitMiB: 512,
+        })
+        const container = task.addContainer('default', {
+            image: ecs.ContainerImage.fromEcrRepository(repositoryStack.repository),
+            environment: {
+                'GRPC_SERVER_ENDPOINT': serverStack.loadBalancer.loadBalancerDnsName,
+            },
+            logging: ecs.LogDrivers.awsLogs({ streamPrefix: 'sophie-grpc-ecs-client' })
+        })
+        container.addPortMappings({
+            containerPort: 8080,
+        })
+
+        const serviceSecurityGroup = new ec2.SecurityGroup(this, `service-security-group`, {
+            vpc: this.base.vpc,
+            allowAllOutbound: true,
+            description: 'SG for the service on fargate'
+        })
+        serviceSecurityGroup.addIngressRule(ec2.Peer.ipv4(this.base.vpc.vpcCidrBlock), ec2.Port.tcp(8080), 'api port')
+
+        const service = new ecs.FargateService(this, 'service', {
+            serviceName: 'grpc-client',
+            cluster: this.base.cluster,
+            taskDefinition: task,
+            desiredCount: 1,
+            platformVersion: FargatePlatformVersion.VERSION1_4,
+            securityGroups: [ serviceSecurityGroup ]
+        })
+
+        const loadBalancer = new elbv2.ApplicationLoadBalancer(this, 'lb', {
+            vpc: this.base.vpc,
+            internetFacing: true,
+        })
+        const listener = loadBalancer.addListener('listener', { port: 80 })
+        listener.addTargets('api', {
+          port: 8080,
+          targets: [service]
+        })
     }
 }
 
@@ -94,7 +155,25 @@ const baseStack = new BaseStack(app, appName, {
     },
 })
 
-const serverStack = new ServerStack(app, `${appName}-server`, baseStack, {
+const serverRepository = new RepositoryStack (app, `${appName}-server-repository`, 'areasophie/grpc-ecs-server', {
+    env: {
+        region: process.env.AWS_DEFAULT_REGION || 'ap-northeast-1'
+    },
+})
+
+const serverStack = new ServerStack(app, `${appName}-server`, baseStack, serverRepository, {
+    env: {
+        region: process.env.AWS_DEFAULT_REGION || 'ap-northeast-1'
+    },
+})
+
+const clientRepository = new RepositoryStack (app, `${appName}-client-repository`, 'areasophie/grpc-ecs-client', {
+    env: {
+        region: process.env.AWS_DEFAULT_REGION || 'ap-northeast-1'
+    },
+})
+
+new ClientStack(app, `${appName}-client`, baseStack, serverStack, clientRepository, {
     env: {
         region: process.env.AWS_DEFAULT_REGION || 'ap-northeast-1'
     },
